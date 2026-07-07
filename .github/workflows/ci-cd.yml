@@ -51,8 +51,53 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run ESLint
-        run: npm run lint
+      - name: Run ESLint and export readable report
+        id: eslint
+        run: |
+          set +e
+
+          echo "Static Code Analysis Report" > static-code-analysis-report.txt
+          echo "Generated at: $(date -u)" >> static-code-analysis-report.txt
+          echo "" >> static-code-analysis-report.txt
+          echo "Command: npm run lint" >> static-code-analysis-report.txt
+          echo "========================================" >> static-code-analysis-report.txt
+          echo "" >> static-code-analysis-report.txt
+
+          npm run lint >> static-code-analysis-report.txt 2>&1
+          LINT_EXIT_CODE=$?
+
+          echo "" >> static-code-analysis-report.txt
+          echo "========================================" >> static-code-analysis-report.txt
+          echo "ESLint exit code: ${LINT_EXIT_CODE}" >> static-code-analysis-report.txt
+
+          echo "lint_exit_code=${LINT_EXIT_CODE}" >> "$GITHUB_OUTPUT"
+
+          exit 0
+
+      - name: Publish Static Code Analysis to GitHub Actions Summary
+        if: always()
+        run: |
+          echo "## Static Code Analysis Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat static-code-analysis-report.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Static Code Analysis report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-code-analysis-report
+          path: static-code-analysis-report.txt
+
+      - name: Static Code Analysis Gate
+        run: |
+          if [ "${{ steps.eslint.outputs.lint_exit_code }}" != "0" ]; then
+            echo "Static Code Analysis Gate failed. ESLint found issues."
+            exit 1
+          fi
+
+          echo "Static Code Analysis Gate passed."
 
   build:
     name: Build
@@ -138,7 +183,7 @@ jobs:
             type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build Docker image
+      - name: Build Docker image for local scan
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -147,7 +192,42 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           load: true
 
-      - name: Run Trivy vulnerability scanner
+      - name: Run Trivy scan and export readable report
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.image.outputs.image_ref }}
+          format: 'table'
+          output: 'trivy-report.txt'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+          scanners: 'vuln'
+
+      - name: Publish Trivy report to GitHub Actions Summary
+        if: always()
+        run: |
+          echo "## Trivy Container Image Security Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Image:** \`${{ steps.image.outputs.image_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f trivy-report.txt ]; then
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            cat trivy-report.txt >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Trivy report file was not generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Trivy readable report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-security-report
+          path: trivy-report.txt
+
+      - name: Trivy Security Gate
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.image.outputs.image_ref }}
